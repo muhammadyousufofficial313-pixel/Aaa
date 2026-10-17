@@ -1,60 +1,88 @@
-name: Build and Release Android APK
+name: Build Android APK
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main, master ]
   workflow_dispatch:
-
-permissions:
-  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repository
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
+          distribution: 'zulu'
           java-version: '17'
-          distribution: 'temurin'
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
-        with:
-          gradle-version: '8.11.1'
-
-      - name: Create debug keystore
+      - name: Extract Project Files
         run: |
-          mkdir -p ~/.android
-          keytool -genkey -v -keystore ./debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          unzip -o "Bolo Chat Source.zip" || unzip -o "*.zip"
+          rm -f bun.lock package-lock.json
+          ls
 
-      - name: Create empty .env file
+      - name: Point SDK at repo tarball
         run: |
-          touch .env
-          touch .env.example
+          python3 -c "
+          import json
+          p = json.load(open('package.json'))
+          p['dependencies']['@hatch/space-sdk'] = 'file:./space-sdk.tgz'
+          json.dump(p, open('package.json', 'w'), indent=2)
+          print('sdk path:', p['dependencies']['@hatch/space-sdk'])
+          "
+          ls -la space-sdk.tgz
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v1
+
+      - name: Install Dependencies
+        run: bun install
+
+      - name: Add web build tools
+        run: bun add -d vite @vitejs/plugin-react @tailwindcss/vite
+
+      - name: Write Vite config
+        run: |
+          cat > client/vite.config.ts <<'VITEOF'
+          import { defineConfig } from "vite";
+          import react from "@vitejs/plugin-react";
+          import tailwindcss from "@tailwindcss/vite";
+
+          export default defineConfig({
+            plugins: [react(), tailwindcss()],
+            root: "client",
+            build: { outDir: "dist", emptyOutDir: true },
+          });
+          VITEOF
+          cat client/vite.config.ts
+
+      - name: Build Web Assets
+        run: bun x vite build --config client/vite.config.ts
+
+      - name: Setup Capacitor
+        run: |
+          bun add @capacitor/core @capacitor/cli @capacitor/android
+          bun x cap init "Bolo Chat" "com.bolochat.app" --web-dir client/dist
+          bun x cap add android
+          bun x cap copy
 
       - name: Build Debug APK
-        run: gradle :app:assembleDebug --no-daemon
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug
 
-      - name: Upload APK Artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
-
-      - name: Create GitHub Release with APK
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main'
-        with:
-          tag_name: v1.0.0
-          name: WhatsApp Business Inbox APK v1.0.0
-          body: |
-            ### Direct Download for Android Mobile
-            Click the link below to download and install directly on your phone:
-            - **[Download app-debug.apk](https://github.com/${{ github.repository }}/releases/download/v1.0.0/app-debug.apk)**
-          files: app/build/outputs/apk/debug/app-debug.apk
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: bolo-chat-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
